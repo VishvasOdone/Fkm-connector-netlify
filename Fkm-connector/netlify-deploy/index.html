@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>FKM Connector — Test Hub</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f5f6f8;
+        --card: #ffffff;
+        --border: #e2e5ea;
+        --text: #1a1d21;
+        --muted: #6b7280;
+        --accent: #2563eb;
+        --ok: #15803d;
+        --okbg: #dcfce7;
+        --warn: #b45309;
+        --warnbg: #fef3c7;
+        --err: #b91c1c;
+        --errbg: #fee2e2;
+        --code: #f1f3f5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121417;
+          --card: #1b1f24;
+          --border: #2b3138;
+          --text: #e6e8eb;
+          --muted: #9aa3ad;
+          --accent: #60a5fa;
+          --ok: #4ade80;
+          --okbg: #14321f;
+          --warn: #fbbf24;
+          --warnbg: #3a2c0a;
+          --err: #f87171;
+          --errbg: #3b1618;
+          --code: #23282e;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 2rem 1rem 4rem;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+      }
+      .wrap { max-width: 46rem; margin: 0 auto; }
+      header { margin-bottom: 1.5rem; }
+      h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+      .sub { color: var(--muted); font-size: .9rem; margin: 0; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem 1.4rem;
+        margin-bottom: 1rem;
+      }
+      h2 { font-size: .95rem; margin: 0 0 .85rem; letter-spacing: .01em; }
+      label { display: block; font-size: .82rem; color: var(--muted); margin: 0 0 .3rem; }
+      input {
+        width: 100%;
+        padding: .55rem .7rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: .92rem;
+        font-family: inherit;
+      }
+      input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .row { display: flex; gap: .75rem; flex-wrap: wrap; }
+      .row > div { flex: 1 1 12rem; }
+      button {
+        margin-top: .9rem;
+        padding: .55rem 1.1rem;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font-size: .9rem;
+        font-weight: 550;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      button:disabled { opacity: .55; cursor: progress; }
+      button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: .4rem;
+        padding: .25rem .6rem;
+        border-radius: 999px;
+        font-size: .8rem;
+        font-weight: 550;
+      }
+      .status.ok { background: var(--okbg); color: var(--ok); }
+      .status.warn { background: var(--warnbg); color: var(--warn); }
+      .status.err { background: var(--errbg); color: var(--err); }
+      pre {
+        background: var(--code);
+        border-radius: 8px;
+        padding: .8rem;
+        overflow-x: auto;
+        font-size: .8rem;
+        margin: .85rem 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      code { background: var(--code); padding: .1rem .35rem; border-radius: 4px; font-size: .85em; }
+      .note { font-size: .84rem; color: var(--muted); margin: .85rem 0 0; }
+      ul { margin: .5rem 0 0; padding-left: 1.1rem; font-size: .87rem; color: var(--muted); }
+      li { margin: .25rem 0; }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>FKM Connector — Test Hub</h1>
+        <p class="sub">Production sheets to MRP · Odoo webhook service</p>
+      </header>
+
+      <div class="card">
+        <h2>Service status</h2>
+        <div id="healthStatus"><span class="status warn">checking…</span></div>
+        <pre id="healthOut">—</pre>
+        <button class="secondary" id="healthBtn">Re-check</button>
+      </div>
+
+      <div class="card">
+        <h2>Trigger an order</h2>
+        <div class="row">
+          <div>
+            <label for="orderId">Sales order ID</label>
+            <input id="orderId" type="number" placeholder="42" />
+          </div>
+          <div>
+            <label for="orderName">Order name (optional)</label>
+            <input id="orderName" type="text" placeholder="S00042" />
+          </div>
+        </div>
+        <button id="sendBtn">Send webhook</button>
+        <pre id="sendOut">—</pre>
+        <p class="note" id="sendNote"></p>
+      </div>
+
+      <div class="card">
+        <h2>How this works</h2>
+        <ul>
+          <li>The order must be <strong>confirmed</strong> (state <code>sale</code>) — anything else is skipped.</li>
+          <li>Processing runs in the background. The response only confirms the request was accepted, not that it succeeded.</li>
+          <li>Check the result in the order's chatter in Odoo: it should carry <code>productie.xlsx</code>.</li>
+          <li id="logHint"></li>
+        </ul>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      // Same-origin on Netlify; override with ?api=https://host to point at another deployment.
+      const API = new URLSearchParams(location.search).get('api')?.replace(/\/$/, '') ?? '';
+      const onNetlify = !API;
+
+      $('logHint').innerHTML = onNetlify
+        ? 'Detailed logs live in the Netlify dashboard under <strong>Functions → webhook-background</strong>.'
+        : 'Detailed logs are printed by the connector process.';
+
+      function badge(el, kind, text) {
+        el.innerHTML = `<span class="status ${kind}">${text}</span>`;
+      }
+
+      async function checkHealth() {
+        const btn = $('healthBtn');
+        btn.disabled = true;
+        badge($('healthStatus'), 'warn', 'checking…');
+        try {
+          const res = await fetch(`${API}/health`, { headers: { Accept: 'application/json' } });
+          const body = await res.json();
+          $('healthOut').textContent = JSON.stringify(body, null, 2);
+          const odoo = body.odoo;
+          if (odoo && odoo.connected === false) {
+            badge($('healthStatus'), 'err', 'service up · Odoo unreachable');
+          } else {
+            badge($('healthStatus'), 'ok', `service up (${res.status})`);
+          }
+        } catch (e) {
+          badge($('healthStatus'), 'err', 'unreachable');
+          $('healthOut').textContent = String(e);
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function sendWebhook() {
+        const id = Number($('orderId').value);
+        if (!id) {
+          $('sendOut').textContent = 'Enter a sales order ID first.';
+          return;
+        }
+
+        const btn = $('sendBtn');
+        btn.disabled = true;
+        $('sendOut').textContent = 'sending…';
+        $('sendNote').textContent = '';
+
+        const payload = { _model: 'sale.order', _id: id };
+        const name = $('orderName').value.trim();
+        if (name) payload.display_name = name;
+
+        try {
+          const res = await fetch(`${API}/webhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const text = await res.text();
+          $('sendOut').textContent = `HTTP ${res.status}\n${text || '(empty body)'}`;
+
+          if (res.status === 202) {
+            $('sendNote').textContent =
+              'Accepted. A background function returns 202 with no body by design, so this ' +
+              'is not a success confirmation — verify the attachments in the Odoo chatter.';
+          } else if (res.ok) {
+            $('sendNote').textContent = 'Accepted. Verify the attachments in the Odoo chatter.';
+          } else {
+            $('sendNote').textContent = 'The request was rejected — see the response above.';
+          }
+        } catch (e) {
+          $('sendOut').textContent = String(e);
+          $('sendNote').textContent = 'Request failed before reaching the service.';
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      $('healthBtn').addEventListener('click', checkHealth);
+      $('sendBtn').addEventListener('click', sendWebhook);
+      checkHealth();
+    </script>
+  </body>
+</html>

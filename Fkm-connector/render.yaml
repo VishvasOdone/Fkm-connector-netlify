@@ -1,0 +1,20 @@
+# Render.com blueprint. Push this repo to GitHub, then in Render:
+# New > Blueprint > select the repo. Set the secret env vars in the dashboard.
+services:
+  - type: web
+    name: fkm-connector
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter # 'free' spins down when idle and would drop in-flight webhooks
+    healthCheckPath: /health
+    envVars:
+      - key: ODOO_URL
+        sync: false # set in the dashboard
+      - key: ODOO_DB
+        sync: false
+      - key: ODOO_API_USER
+        sync: false
+      - key: ODOO_API_KEY
+        sync: false
+      - key: PORT
+        value: 8000

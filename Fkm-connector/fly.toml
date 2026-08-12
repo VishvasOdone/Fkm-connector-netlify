@@ -1,0 +1,31 @@
+# Fly.io config. Run `fly launch --no-deploy` once to claim an app name,
+# then set secrets and deploy:
+#   fly secrets set ODOO_URL=... ODOO_DB=... ODOO_API_USER=... ODOO_API_KEY=...
+#   fly deploy
+app = "fkm-connector"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Keep one machine warm: a cold start plus LibreOffice startup would push
+  # webhook processing well past Odoo's patience.
+  auto_stop_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+
+[[vm]]
+  # LibreOffice needs real memory; 256 MB machines OOM mid-conversion.
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

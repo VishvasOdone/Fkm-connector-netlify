@@ -1,0 +1,263 @@
+================================================================================
+FKM CONNECTOR — RECORD OF CHANGES
+Odoo "Route C / Variant C3" production-sheet service
+================================================================================
+
+SUMMARY
+-------
+The service was rewritten from Python to TypeScript, the Odoo transport was
+changed from XML-RPC to JSON-RPC, and deployment support was added for both
+container hosts and Netlify. PDF output was built and then removed on request;
+the service now produces a single .xlsx attachment per order.
+
+The original Python implementation is preserved, unchanged, in legacy-python/.
+
+
+================================================================================
+1. PYTHON -> TYPESCRIPT PORT
+================================================================================
+
+Old (Python)                     New (TypeScript)
+--------------------------------------------------------------------------------
+app.py            (FastAPI)      src/app.ts            (Express)
+odoo_rpc.py       (xmlrpc)       src/odooRpc.ts        (JSON-RPC over fetch)
+config.py                        src/config.ts
+calculator.py     (1553 lines)   src/calculator.ts + src/render/* + src/spreadsheet/*
+requirements.txt                 package.json
+
+calculator.py was split into focused modules instead of one file:
+
+  src/spreadsheet/refs.ts        A1 reference parsing, column letters
+  src/spreadsheet/values.ts      value coercion, comparison, rounding rules
+  src/spreadsheet/tokenizer.ts   formula tokenizer
+  src/spreadsheet/parser.ts      recursive-descent expression parser
+  src/spreadsheet/unsquish.ts    o-spreadsheet 19.1+ squished-cell delta decoder
+  src/spreadsheet/evaluator.ts   lazy, memoised evaluator with cycle detection
+  src/spreadsheet/book.ts        builds the evaluable book from Odoo JSON
+  src/render/model.ts            evaluated view of the workbook (values + styles)
+  src/render/xlsx.ts             ExcelJS emitter
+  src/calculator.ts              RPC fetch, revision replay, validation
+  src/processOrder.ts            the order worker, shared by all entry points
+  src/logger.ts                  stdout logger matching the Python log format
+
+VERIFICATION OF THE PORT
+  - Engine parity vs the Python original: 49/49 evaluated cells identical
+    (fixture covering squished N/S/R deltas, cross-sheet refs, quoted sheet
+    names, IF/IFERROR/SUM/ROUND*/AVERAGE/MAX/MIN/ABS/INT/PRODUCT/COUNT/AND/OR/
+    NOT, %, ^, &, unary minus, self-reference -> #CYCLE, unknown function ->
+    #NAME?, missing sheet -> #REF!).
+  - Generated .xlsx compared cell-by-cell against the Python output:
+    identical values, fonts, alignment, wrap, merges, column widths, row
+    heights and sheet filtering.
+
+DELIBERATE DIFFERENCES FROM THE PYTHON ORIGINAL
+  1. BUG FIX - flag_empty_calculator passed its message dict as a POSITIONAL
+     argument to execute_kw. Odoo's message_post is keyword-only, so that call
+     would have raised. It now passes kwargs. Verified working.
+  2. Vertical alignment - Python mapped "middle" -> "center" for openpyxl.
+     ExcelJS uses "middle" natively. Both produce vertical=center in the file.
+  3. Empty-workbook guard - if no sheet matches the print-sheet patterns, the
+     Python code removed every sheet and saved an empty workbook. The port keeps
+     all sheets and logs a warning instead.
+  4. Fill alpha - openpyxl wrote 00RRGGBB, the port writes FFRRGGBB (opaque).
+     Excel ignores alpha on fills; both render identically.
+
+NOT PORTED (dead code in the Python original - nothing called it)
+  - LibreOffice UNO listener and headless CLI recalculation
+  - _patch_xlsx_template / XML template patching
+  - reportlab (was an unused dependency)
+
+
+================================================================================
+2. ODOO TRANSPORT: XML-RPC -> JSON-RPC
+================================================================================
+
+src/odooRpc.ts now calls POST {ODOO_URL}/jsonrpc using the built-in fetch API.
+
+Reason: the `xmlrpc` npm package is CommonJS with dynamic requires, which is
+fragile to bundle for serverless. JSON-RPC needs no dependency at all, so the
+identical code runs on a server and inside a Netlify function.
+
+Public API is unchanged: OdooClient.create(), call(), getMrpPartnerIds(),
+flagEmptyCalculator(). JSON-RPC returns errors in an envelope rather than
+throwing, so those are mapped to thrown Errors to preserve the control flow.
+
+Verified against the live instance: authentication, record reads,
+getMrpPartnerIds(), and error mapping.
+
+
+================================================================================
+3. PDF — ADDED, THEN REMOVED ON REQUEST
+================================================================================
+
+PDF export was implemented with two interchangeable engines (headless
+LibreOffice for fidelity, pdf-lib for serverless), then removed entirely at
+your request.
+
+CURRENT STATE: no PDF. Each order receives one attachment, "<order> -
+productie.xlsx", and the chatter message reads:
+  "Volledige Excel-bestand in bijlage."
+
+Removed in the final pass:
+  - src/pdf.ts            (engine selector + soffice subprocess)
+  - src/render/pdf.ts     (pdf-lib renderer)
+  - pdf-lib dependency
+  - PDF_ENGINE, LIBREOFFICE_BIN, PDF_TIMEOUT_MS config
+  - LibreOffice install from the Dockerfile
+  - DEFAULT_COL_PX / DEFAULT_ROW_PX (existed only for PDF layout)
+
+Side effects: Docker image 657 MB -> 234 MB; Netlify bundle 1.2 MB -> 813 KB.
+The .xlsx output was re-verified as identical to the Python original after the
+removal.
+
+
+================================================================================
+4. NETLIFY SUPPORT
+================================================================================
+
+netlify/functions/webhook.mts        POST /webhook — BACKGROUND function
+netlify/functions/health.mts         GET  /health  — health + Odoo connectivity
+netlify/functions/process-order.mts  POST /api/process-order — synchronous
+netlify.toml                         Git-deploy config
+public/index.html                    "Test Hub" page (health check + trigger)
+scripts/build-netlify.mjs            builds a drag-and-drop deploy folder
+
+WHY A BACKGROUND FUNCTION
+Serverless runtimes freeze a function the moment it returns, which would kill
+the fire-and-forget worker. A background function answers with an empty 202
+immediately and keeps running for up to 15 minutes.
+
+CONSEQUENCE: on Netlify the webhook ALWAYS returns 202 with no body. The JSON
+status replies (ignored / error) exist only in the function logs. Netlify also
+retries a failed invocation after 1 and 2 minutes, so a hard failure can post
+the sheets more than once.
+
+process-order.mts is deliberately NOT a background function, because it returns
+the processing result. It is therefore bound by Netlify's 60-second limit.
+
+MANUAL-UPLOAD BUILD
+  npm run build:netlify   ->  netlify-deploy/  (and zip it for upload)
+
+Drag-and-drop deploys run no build step, so each function is pre-bundled with
+esbuild with every dependency inlined. Verified by running the bundle from a
+directory with no node_modules anywhere up the tree.
+
+The webhook is emitted as "webhook-background.mjs": the -background filename
+suffix is the signal Netlify honours even for prebuilt functions.
+
+
+================================================================================
+5. DEAD CODE REMOVED
+================================================================================
+
+src/config.ts        MRP_PARTNER_GROUP_ID, WEBHOOK_SECRET,
+                     POLLING_INTERVAL_SECONDS, TEMPLATE_PATH,
+                     LIBREOFFICE_UNO_HOST, LIBREOFFICE_UNO_PORT
+                     (all carried over from Python, never read)
+src/odooRpc.ts       DomainLeaf / Domain types
+src/calculator.ts    dead back-compat wrapper and re-export
+src/render/pdf.ts    unused PDFPage import
+src/app.ts           unused variable in the health route
+disk                 legacy-python/__pycache__/
+
+tsconfig.json now sets noUnusedLocals and noUnusedParameters, so dead locals and
+imports fail the build instead of accumulating.
+
+KEPT ON PURPOSE
+  legacy-python/                     reference implementation; it is what the
+                                     49/49 parity check compares against
+  Dockerfile, .dockerignore,
+  render.yaml, fly.toml              container deployment path
+
+
+================================================================================
+6. NEW / CHANGED FILES
+================================================================================
+
+ADDED
+  src/*.ts, src/render/*.ts, src/spreadsheet/*.ts   the service
+  netlify/functions/*.mts                           Netlify entry points
+  netlify.toml, public/index.html                   Netlify config + Test Hub
+  scripts/build-netlify.mjs                         deploy-folder builder
+  package.json, package-lock.json, tsconfig.json    Node project
+  Dockerfile, .dockerignore                         container build
+  render.yaml, fly.toml                             container host configs
+  .env.example, .gitignore                          config template, ignores
+  CHANGES.txt                                       this file
+
+MOVED
+  app.py, calculator.py, config.py, odoo_rpc.py, requirements.txt
+    -> legacy-python/   (nothing was deleted)
+
+REWRITTEN
+  README.md
+
+RUNTIME DEPENDENCIES
+  dotenv, exceljs, express        (dev: typescript, esbuild, @netlify/functions,
+                                   @types/node, @types/express)
+
+
+================================================================================
+7. NETLIFY ACCOUNT CHANGES (made in the dashboard)
+================================================================================
+
+Site: dainty-muffin-a51919
+
+  1. Project visibility: Private -> PUBLIC (production and previews).
+     Private visibility was returning HTTP 401 with a Netlify team-login
+     redirect for every request, including POST /webhook. Odoo cannot log in,
+     so the integration could never have worked while it was private.
+
+  2. Redeployed the current build (fkm-connector-netlify.zip).
+     The four Odoo environment variables were already set correctly, but
+     Netlify binds environment variables AT DEPLOY TIME — variables added after
+     a drag-and-drop deploy never reach the already-published functions. A fresh
+     deploy was required. This is the trap behind the repeated
+     "Missing environment variables" error.
+
+No other account settings were altered. Environment variable VALUES were not
+changed, only read.
+
+VERIFIED AFTER THE CHANGES
+  GET  /                      200
+  GET  /health                200  {"status":"ok","odoo":{"connected":true}}
+  POST /webhook               202
+  POST /api/process-order {}  400  (validation working)
+
+
+================================================================================
+8. OPEN ITEMS / THINGS TO BE AWARE OF
+================================================================================
+
+SECURITY
+  - /webhook and /api/process-order have NO authentication. The site is now
+    public, so anyone who learns the URL can trigger order processing against
+    your Odoo. A shared-secret header can be added on request.
+  - .env.example currently contains real Odoo credentials. That file is the
+    committed template and should hold placeholders only; keep live values in
+    .env (which is gitignored).
+  - The Netlify account password was shared in chat and should be changed.
+    The Odoo API key has appeared in several places and is worth rotating.
+
+OPERATIONAL
+  - getMrpPartnerIds() returned an empty list on the test database: no users
+    are in mrp.group_mrp_user, so the chatter message notifies nobody. Add
+    users to the MRP group in Odoo.
+  - The API user needs base.group_system to read spreadsheet.revision. Without
+    it the revision query fails, and the code logs a warning and continues with
+    stale snapshot data rather than erroring — you would get an outdated sheet
+    with no obvious failure.
+  - Netlify Free plan: 300 credits/month, 15 credits per production deploy
+    (~20 deploys/month). Deploy to one site and batch changes.
+  - Two unused Netlify sites exist (preeminent-youtiao-9cfcf0,
+    transcendent-kulfi-571c75) and should be deleted to avoid pointing Odoo at
+    a dead one.
+
+NOT YET DONE
+  - No real order has been processed end-to-end against the live Odoo. The full
+    flow has only been verified against a mock Odoo server and by direct
+    function invocation.
+  - netlify dev was never run locally: the Netlify CLI requires Node 20 and this
+    machine has Node 18.19.1. The deploy itself uses NODE_VERSION=20.
+
+================================================================================
