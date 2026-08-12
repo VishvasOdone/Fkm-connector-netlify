@@ -95,8 +95,8 @@ LibreOffice for fidelity, pdf-lib for serverless), then removed entirely at
 your request.
 
 CURRENT STATE: no PDF. Each order receives one attachment, "<order> -
-productie.xlsx", and the chatter message reads:
-  "Volledige Excel-bestand in bijlage."
+productie.xlsx", and the chatter message reads (see section 9):
+  "Bijgevoegd vindt u het MRP-blad voor <order>."
 
 Removed in the final pass:
   - src/pdf.ts            (engine selector + soffice subprocess)
@@ -226,7 +226,112 @@ VERIFIED AFTER THE CHANGES
 
 
 ================================================================================
-8. OPEN ITEMS / THINGS TO BE AWARE OF
+8. IMAGES IN THE GENERATED WORKBOOK
+================================================================================
+
+Sheet figures were previously ignored, so every image in the calculator was
+dropped from the .xlsx. They are now rendered.
+
+HOW A FIGURE IS STORED
+  o-spreadsheet keeps images in each sheet's "figures" array:
+
+    { "id": "3", "col": 153, "row": 73, "offset": {"x": 0, "y": 1},
+      "width": 168, "height": 56, "tag": "image",
+      "data": { "path": "/web/image/746" } }
+
+  col/row are 0-based, offset/width/height are pixels at 96 DPI, and the path
+  is an Odoo image URL pointing at an ir.attachment.
+
+NEW FILES
+  src/render/images.ts   resolves figure paths -> image bytes, converts WebP
+  src/render/png.ts      RGBA -> PNG encoder built on Node's zlib
+
+CHANGED
+  src/render/model.ts    RenderSheet now carries `figures`
+  src/render/xlsx.ts     emits oneCellAnchor drawings; anchor maths
+  src/calculator.ts      buildXlsx takes the Odoo client so images can be read;
+                         overlaySpreadsheetInstance now replaces the template's
+                         figures with the order instance's (previously the
+                         template's images would have won)
+  src/spreadsheet/book.ts  SheetJson gained `figures`
+  scripts/build-netlify.mjs  inlines the WebP wasm binary (see below)
+
+HOW THE BYTES ARE FETCHED
+  Over RPC from ir.attachment (id parsed out of the path), not over HTTP. The
+  JSON-RPC credentials already work, so no session cookie or portal token is
+  needed. Paths with a cache-busting suffix ("/web/image/743-a1b2c3/logo.png")
+  and with a query string ("?access_token=…") are both handled.
+
+WEBP -> PNG
+  Odoo stores spreadsheet images as WebP, which older Excel builds do not
+  render. @cwasm/webp (98 KB, WebAssembly) decodes to raw RGBA and png.ts wraps
+  the pixels in a PNG using Node's built-in zlib — so the conversion adds one
+  small dependency and no native code. PNG/JPEG/GIF are embedded as-is.
+
+  NETLIFY TRAP: the package loads its .wasm with
+  fs.readFileSync(path.join(__dirname, 'webp.wasm')). Bundling moves the code
+  away from that file, so the function would have thrown on the first image.
+  build-netlify.mjs now rewrites that read to an inlined base64 buffer, and
+  throws at build time if the package ever changes shape. Verified by decoding
+  a WebP from the bundled function in a directory with no node_modules.
+
+TWO WAYS A FIGURE FAILS, BOTH HANDLED
+  1. The attachment no longer exists.
+  2. The id has been REUSED by an unrelated record. Attachment ids are a plain
+     sequence, so a deleted image's id later belongs to a snapshot, a CSS
+     bundle or a JS asset. The mimetype is verified before anything is
+     embedded; without that check those bytes would land in the workbook as a
+     corrupt image.
+  Neither aborts the order: the image is skipped and one summary line is
+  logged. See "OPEN ITEMS" below — this is the current state of the live data.
+
+VERIFIED
+  Order S00005 / spreadsheet 20 rendered end-to-end against the live Odoo
+  (read-only, nothing posted): 3 of 17 figures resolved, 6 id-reuse collisions
+  correctly refused (text/css, application/json, application/javascript), 8
+  attachments genuinely missing. The 3 surviving images decode to valid PNGs
+  and land at the right anchor and size — the emitted EMU extent matches the
+  figure's declared pixel size exactly (693 px -> 6600825 EMU). Checked
+  visually by converting the .xlsx to PDF.
+
+
+================================================================================
+9. WHO THE PRODUCTION SHEETS ARE SENT TO
+================================================================================
+
+BEFORE  partner_ids = every user in mrp.group_mrp_user. That group was empty on
+        the test database, so the message notified nobody.
+NOW     one recipient, Emiel Scholten, resolved from the new MRP_NOTIFY_EMAIL
+        setting (default e.scholten@fkm-lichtstraten.nl).
+
+Matched on email, not on partner id: the id differs between databases (he is
+partner 3 on fkm-test-12-aug-2026), the address does not.
+
+If the address matches no partner, the message is still posted with the
+attachment — it just notifies nobody, and an error is logged saying so. Losing
+the recipient must not also lose the sheet.
+
+The success post is a MESSAGE, not a log note: subtype mail.mt_comment plus
+message_type 'comment', which is exactly what the chatter's "Send message"
+button produces, so the recipient gets the email.
+
+Body text changed from the Dutch "Volledige Excel-bestand in bijlage." to
+  "Bijgevoegd vindt u het MRP-blad voor <order>."
+The subject is unchanged: "Productie-bladen <order>".
+
+The two failure paths were left as internal log notes on request:
+  - "Quote Calculator was never opened for this order"   (odooRpc.ts)
+  - "Automatic generation of production sheets failed: …" (processOrder.ts)
+
+The .xlsx generation code was not touched.
+
+VERIFIED  getMrpPartnerIds() against the live database returns [3] and logs
+          "Production sheets will be sent to Emiel Scholten
+          <e.scholten@fkm-lichtstraten.nl> (partner 3)."
+
+
+================================================================================
+10. OPEN ITEMS / THINGS TO BE AWARE OF
 ================================================================================
 
 SECURITY
@@ -240,9 +345,23 @@ SECURITY
     The Odoo API key has appeared in several places and is worth rotating.
 
 OPERATIONAL
-  - getMrpPartnerIds() returned an empty list on the test database: no users
-    are in mrp.group_mrp_user, so the chatter message notifies nobody. Add
-    users to the MRP group in Odoo.
+  - MOST SPREADSHEET IMAGES ARE MISSING FROM THE DATABASE. Measured across
+    every sale.order.spreadsheet: 223 figure references resolved to only 9 real
+    images. Typical order (S00005 / spreadsheet 20): 25 figures, 3 renderable,
+    9 pointing at a non-image record through id reuse, 13 pointing at
+    attachments that no longer exist. Odoo shows these as broken-image
+    placeholders too, so the sheets are already incomplete on screen — the
+    connector cannot invent bytes the database does not have. The images have
+    to be re-inserted in Odoo.
+  - Some figures reference attachment ids ABOVE the highest id that exists in
+    the database, which means those workbooks were imported or restored from a
+    different database without their attachments.
+  - The same broken-image pattern was measured on BOTH Odoo instances used
+    during this work (fkm-test-12-aug and fkm-test-12-aug-2026), so it is a
+    property of the spreadsheet data itself, not of one database.
+  - (Resolved in section 9) getMrpPartnerIds() returned an empty list because
+    no users are in mrp.group_mrp_user. The message now goes to a single
+    configured recipient instead of that group.
   - The API user needs base.group_system to read spreadsheet.revision. Without
     it the revision query fails, and the code logs a warning and continues with
     stale snapshot data rather than erroring — you would get an outdated sheet

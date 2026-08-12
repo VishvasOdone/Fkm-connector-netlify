@@ -100,18 +100,23 @@ export async function processOrder(orderId, orderName, spreadsheetIdIn) {
     }
     // 4. Push results back to Odoo chatter & attach the workbook.
     try {
+        // One recipient, resolved from MRP_NOTIFY_EMAIL.
         const mrpPartnerIds = await odoo.getMrpPartnerIds();
         const xlsxAttId = await createAttachment(odoo, orderId, {
             name: `${orderName} - productie.xlsx`,
             bytes: xlsxBytes,
             mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         });
+        // Posted as a message, not a log note: `mail.mt_comment` with
+        // message_type 'comment' is what the chatter's "Send message" button
+        // produces, so the single recipient is notified by email.
         await odoo.call('sale.order', 'message_post', [orderId], {
             subject: `Productie-bladen ${orderName}`,
-            body: 'Volledige Excel-bestand in bijlage.',
+            body: `Bijgevoegd vindt u het MRP-blad voor ${orderName}.`,
             partner_ids: mrpPartnerIds,
             attachment_ids: [xlsxAttId],
             subtype_xmlid: 'mail.mt_comment',
+            message_type: 'comment',
         });
         logger.info(`Successfully generated & attached production sheets for order ${orderId}.`);
     }

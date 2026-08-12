@@ -11,7 +11,8 @@ Implemented in **TypeScript on Node.js** (ported 1:1 from the original Python se
 - **In-process evaluation**: A self-contained o-spreadsheet engine (unsquisher → tokenizer → parser → evaluator) resolves every formula in Node, so no Excel and no formula recalculation step is needed. It covers the functions these calculators use — `IF`/`IFERROR`, `AND`/`OR`/`NOT`, `SUM`/`MAX`/`MIN`/`AVERAGE`/`COUNT`/`PRODUCT`/`ABS`/`INT`, `ROUND`/`ROUNDUP`/`ROUNDDOWN`, `FLOOR`/`CEILING`, `SQRT`, `SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`PI`/`RADIANS`/`DEGREES`, `INDEX`/`MATCH`, `ADDRESS`, `TODAY` and the `IS*` predicates — plus embedded error literals (`#REF!`), omitted arguments (`ROUNDUP(A1/B1,)`) and cell number formats. Anything it still does not know is logged as `Unimplemented spreadsheet function(s) -> #NAME?`, because one missing function turns every dependent cell into `#NAME?`.
 - **Transport**: Odoo JSON-RPC over `fetch` — no native or CommonJS dependency, so the same code runs on a server and in a serverless function.
 - **Output**: `productie.xlsx`, containing **ONLY** the print sheets — every sheet whose name **starts with `Afdrukpagina`**, matched case-insensitively (`Afdrukpagina 1`, `afdrukpagina 2`, `AFDRUKPAGINA 3` all qualify) — written with ExcelJS including styles, cell borders, merges and row/column dimensions. Borders and fills are read from the workbook's shared tables and applied to empty cells too, so the table structure comes out as it looks in Odoo rather than as bare floating values. If no sheet matches, **nothing is sent**: no workbook is attached and no chatter message is posted; the skip is logged as a warning.
-- **No native dependencies**: pure JavaScript end to end, which is what lets the identical code run on a container host and inside a Netlify function.
+- **Images**: sheet figures tagged `image` are placed in the workbook at their o-spreadsheet anchor (cell + pixel offset) and original size. The bytes come from `ir.attachment` over RPC — no session cookie needed — and Odoo's WebP is converted to PNG in-process so it renders in every Excel version. A figure whose image cannot be resolved is skipped and logged; see *Missing images* below.
+- **No native dependencies**: pure JavaScript end to end, which is what lets the identical code run on a container host and inside a Netlify function. The WebP decoder is WebAssembly, and its binary is inlined into the Netlify bundle at build time.
 - **Validation**: Scans the print sheets for unexpected formula errors and logs them before completing.
 
 ## Project Layout
@@ -25,7 +26,9 @@ src/
   config.ts               Environment configuration
   logger.ts               Minimal stdout logger
   render/
-    model.ts              Evaluated view of the workbook (values + styles)
+    model.ts              Evaluated view of the workbook (values + styles + figures)
+    images.ts             Resolves figure images from ir.attachment; WebP -> PNG
+    png.ts                Minimal RGBA -> PNG encoder (Node zlib, no dependency)
     xlsx.ts               ExcelJS emitter
   spreadsheet/
     refs.ts               A1 reference parsing and column-letter helpers
@@ -66,6 +69,11 @@ Requires **Node.js 18+**. No system packages needed.
    - `ODOO_DB`
    - `ODOO_API_USER`
    - `ODOO_API_KEY`
+   - `MRP_NOTIFY_EMAIL` (optional, default `e.scholten@fkm-lichtstraten.nl`) —
+     the one person the production-sheet message is addressed to. Matched on the
+     partner's email rather than an id, so it survives a move to another
+     database. If no partner has that address the message is still posted, with
+     the attachment, but notifies nobody and an error is logged.
    - `PORT` (optional, default `8000`)
 3. Build and run the web service:
    ```bash
@@ -147,6 +155,34 @@ Then point the Odoo Server Action at `https://<site>.netlify.app/webhook`.
 replies (`ignored` / `error`) exist only in the function logs — check them in the Netlify
 dashboard when debugging. Netlify also retries a failing invocation after 1 and 2 minutes,
 so a hard failure can post the sheets more than once.
+
+## Missing images
+
+A figure stores only a URL (`/web/image/743`); the picture itself is an
+`ir.attachment` row. Two things go wrong with that in practice, and both show up
+as gaps in the generated sheet **and** as broken-image placeholders in Odoo
+itself:
+
+- **The attachment is gone.** Deleting it, or importing a workbook from another
+  database, leaves the figure pointing at nothing. A workbook copied from
+  another database is easy to spot: its figures reference attachment ids higher
+  than the ids that exist locally.
+- **The id has been reused.** Attachment ids are a plain sequence, so a deleted
+  image's id is later handed to an unrelated record — a spreadsheet snapshot, a
+  CSS bundle, a JS asset. The service checks the mimetype and refuses anything
+  that is not `image/*`; without that check those bytes would be embedded as a
+  corrupt picture.
+
+Neither case fails the order. Each run logs one summary line:
+
+```
+WARNING:images:Figure images: 3/17 resolved. 8 attachment(s) no longer exist (746, 747, …);
+6 id(s) now belong to a non-image record — id reuse, skipped (#755 (text/css, "web.report_assets_common.min.css"); …)
+```
+
+If that line reports few resolved images, the images are missing in Odoo and
+have to be re-inserted into the spreadsheet there — the connector renders what
+the database still has.
 
 ## Endpoint
 

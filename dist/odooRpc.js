@@ -1,4 +1,4 @@
-import { ODOO_URL, ODOO_DB, ODOO_API_USER, ODOO_API_KEY } from './config.js';
+import { ODOO_URL, ODOO_DB, ODOO_API_USER, ODOO_API_KEY, MRP_NOTIFY_EMAIL } from './config.js';
 import { getLogger, errText } from './logger.js';
 const logger = getLogger('odooRpc');
 let requestId = 0;
@@ -80,29 +80,29 @@ export class OdooClient {
             kwargs,
         ]);
     }
-    /** Partner ids of every user in `mrp.group_mrp_user` (memoised per client). */
+    /**
+     * Partner id of the one person the production sheets are addressed to,
+     * resolved from `MRP_NOTIFY_EMAIL` and memoised per client.
+     *
+     * Returns an empty list when the address matches nobody. The caller still
+     * posts the message in that case: losing the recipient must not also lose
+     * the attachment.
+     */
     async getMrpPartnerIds() {
         if (this.mrpPartnerIds === null) {
             try {
-                const groupXml = await this.call('ir.model.data', 'search_read', [
-                    [
-                        ['module', '=', 'mrp'],
-                        ['name', '=', 'group_mrp_user'],
-                    ],
-                ], { fields: ['res_id'] });
-                if (groupXml && groupXml.length) {
-                    const groupId = groupXml[0].res_id;
-                    const users = await this.call('res.users', 'search_read', [[['groups_id', 'in', [groupId]]]], { fields: ['partner_id'] });
-                    this.mrpPartnerIds = users
-                        .filter((u) => Boolean(u.partner_id))
-                        .map((u) => u.partner_id[0]);
+                const partners = await this.call('res.partner', 'search_read', [[['email', '=ilike', MRP_NOTIFY_EMAIL]], ['id', 'name']], { limit: 1 });
+                if (partners && partners.length) {
+                    this.mrpPartnerIds = [partners[0].id];
+                    logger.info(`Production sheets will be sent to ${partners[0].name} <${MRP_NOTIFY_EMAIL}> (partner ${partners[0].id}).`);
                 }
                 else {
                     this.mrpPartnerIds = [];
+                    logger.error(`No partner has the address ${MRP_NOTIFY_EMAIL}; the message will be posted without a recipient. Set MRP_NOTIFY_EMAIL to the right address.`);
                 }
             }
             catch (e) {
-                logger.error(`Error fetching MRP partners: ${errText(e)}`);
+                logger.error(`Error resolving the notification partner: ${errText(e)}`);
                 this.mrpPartnerIds = [];
             }
         }

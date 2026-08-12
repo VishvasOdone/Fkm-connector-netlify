@@ -12,7 +12,7 @@
  *   netlify/functions/*.mjs       bundled, dependency-free functions
  */
 import { build } from 'esbuild';
-import { cp, mkdir, rm, readdir, stat } from 'node:fs/promises';
+import { cp, mkdir, rm, readdir, readFile, stat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +30,36 @@ async function dirSize(dir) {
 
 await rm(out, { recursive: true, force: true });
 await mkdir(join(out, 'netlify', 'functions'), { recursive: true });
+
+/**
+ * The WebP decoder loads its WebAssembly module with
+ * `fs.readFileSync(path.join(__dirname, 'webp.wasm'))`. Bundling moves the code
+ * away from that file, so `__dirname` no longer points anywhere useful and the
+ * function would throw the first time it met an image. Inlining the binary as
+ * base64 keeps the bundle genuinely self-contained.
+ */
+const inlineWebpWasm = {
+  name: 'inline-cwasm-webp',
+  setup(builder) {
+    builder.onLoad({ filter: /@cwasm[\\/]webp[\\/]index\.js$/ }, async (args) => {
+      const source = await readFile(args.path, 'utf8');
+      const wasm = await readFile(join(dirname(args.path), 'webp.wasm'));
+
+      // Anchored to the whole line: the call nests parentheses, so a lazy
+      // match would leave the outer one dangling and break the syntax.
+      const patched = source.replace(
+        /^const code = fs\.readFileSync\(.*\)$/m,
+        `const code = Buffer.from('${wasm.toString('base64')}', 'base64')`,
+      );
+      // Fail loudly rather than shipping a bundle that dies on first use.
+      if (patched === source) {
+        throw new Error('inline-cwasm-webp: the webp.wasm read was not found; the package changed shape.');
+      }
+
+      return { contents: patched, loader: 'js' };
+    });
+  },
+};
 
 // 1. Bundle each function into a single dependency-free ES module.
 //    The webhook is emitted as `webhook-background.mjs`: the `-background`
@@ -54,6 +84,7 @@ for (const { src, dest: name } of entries) {
     sourcemap: false,
     // Node built-ins stay external; everything else is inlined.
     external: ['node:*'],
+    plugins: [inlineWebpWasm],
     banner: {
       // exceljs and friends are CommonJS and expect `require` to exist.
       js: [

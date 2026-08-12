@@ -48,10 +48,27 @@ export interface RenderCell {
   borders: CellBorders | null;
 }
 
+/**
+ * An image anchored on the sheet. `col`/`row` are 0-based, as o-spreadsheet
+ * stores them, and every measurement is in o-spreadsheet pixels.
+ */
+export interface RenderFigure {
+  col: number;
+  row: number;
+  /** Offset from the anchor cell's top-left corner; may be negative. */
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+  /** Odoo image URL, e.g. "/web/image/743". Resolved by render/images.ts. */
+  path: string;
+}
+
 export interface RenderSheet {
   name: string;
   /** Keyed by `rcKey(row, col)`. */
   cells: Map<string, RenderCell>;
+  figures: RenderFigure[];
   merges: string[];
   /** 1-based column index -> width in o-spreadsheet pixels. */
   colWidths: Map<number, number>;
@@ -209,6 +226,42 @@ export interface InputValue {
   value: unknown;
 }
 
+/**
+ * Image figures of one sheet. Charts and other figure tags are ignored: this
+ * renderer only knows how to place a picture.
+ */
+function readFigures(raw: unknown): RenderFigure[] {
+  if (!Array.isArray(raw)) return [];
+
+  const out: RenderFigure[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const fig = item as Record<string, unknown>;
+    if (fig.tag !== 'image') continue;
+
+    const path = (fig.data as Record<string, unknown> | undefined)?.path;
+    if (typeof path !== 'string' || !path) continue;
+
+    const offset = (fig.offset ?? {}) as Record<string, unknown>;
+    const num = (v: unknown, dflt = 0): number => (typeof v === 'number' && Number.isFinite(v) ? v : dflt);
+
+    const width = num(fig.width);
+    const height = num(fig.height);
+    if (width <= 0 || height <= 0) continue;
+
+    out.push({
+      col: Math.max(0, Math.trunc(num(fig.col))),
+      row: Math.max(0, Math.trunc(num(fig.row))),
+      offsetX: num(offset.x),
+      offsetY: num(offset.y),
+      width,
+      height,
+      path,
+    });
+  }
+  return out;
+}
+
 /** Strip a leading '=' / '+' the way the original overlay did. */
 function coerceOverlayValue(value: unknown): Value | null {
   let val: unknown = value;
@@ -329,6 +382,7 @@ export function buildRenderModel(
     const sheet: RenderSheet = {
       name,
       cells: new Map(),
+      figures: [],
       merges: [],
       colWidths: new Map(),
       rowHeights: new Map(),
@@ -392,6 +446,7 @@ export function buildRenderModel(
         if (c > sheet.maxCol) sheet.maxCol = c;
       }
 
+      sheet.figures = readFigures(sheetInfo.figures);
       sheet.merges = [...(sheetInfo.merges ?? [])];
 
       for (const [colIdxStr, colInfo] of Object.entries(sheetInfo.cols ?? {})) {

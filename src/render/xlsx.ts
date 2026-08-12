@@ -2,7 +2,12 @@
 import ExcelJS from 'exceljs';
 
 import { CellBorders, RenderModel, RenderSheet } from './model.js';
+import { LoadedImage } from './images.js';
 import { Value } from '../spreadsheet/values.js';
+
+/** o-spreadsheet's defaults for a column and row that carry no explicit size. */
+const DEFAULT_COL_PX = 96;
+const DEFAULT_ROW_PX = 23;
 
 /** ExcelJS rejects these in worksheet names; openpyxl behaved the same way. */
 function safeSheetName(name: string): string {
@@ -43,7 +48,57 @@ function toCellValue(val: Value): string | number | boolean | null {
   return String(val);
 }
 
-function addSheet(wb: ExcelJS.Workbook, sheet: RenderSheet): void {
+/**
+ * Anchor an image the way o-spreadsheet positions it: on a cell plus a pixel
+ * offset into that cell.
+ *
+ * ExcelJS takes a fractional `col`/`row` and turns the fraction into the
+ * drawing's offset within the cell, so the offset is expressed as a fraction of
+ * the anchor cell's own size. A figure may sit slightly above or left of its
+ * anchor (o-spreadsheet writes offsets like -1), which cannot be represented,
+ * so the anchor is clamped to the sheet's top-left corner.
+ */
+function anchor(sheet: RenderSheet, figCol: number, figRow: number, offsetX: number, offsetY: number) {
+  // colWidths / rowHeights are keyed 1-based; figure coordinates are 0-based.
+  const colPx = sheet.colWidths.get(figCol + 1) ?? DEFAULT_COL_PX;
+  const rowPx = sheet.rowHeights.get(figRow + 1) ?? DEFAULT_ROW_PX;
+
+  const col = figCol + offsetX / colPx;
+  const row = figRow + offsetY / rowPx;
+
+  return { col: Math.max(0, col), row: Math.max(0, row) };
+}
+
+function addImages(
+  wb: ExcelJS.Workbook,
+  ws: ExcelJS.Worksheet,
+  sheet: RenderSheet,
+  images: Map<string, LoadedImage>,
+): void {
+  for (const fig of sheet.figures) {
+    const image = images.get(fig.path);
+    // A figure whose image could not be resolved leaves its space empty;
+    // render/images.ts has already logged why.
+    if (!image) continue;
+
+    const imageId = wb.addImage({ buffer: image.buffer as never, extension: image.extension });
+
+    // o-spreadsheet and Excel both measure at 96 DPI, so the figure's pixel
+    // size carries over unchanged. `oneCell` keeps the image pinned to its
+    // anchor when row heights shift.
+    ws.addImage(imageId, {
+      tl: anchor(sheet, fig.col, fig.row, fig.offsetX, fig.offsetY) as ExcelJS.Anchor,
+      ext: { width: fig.width, height: fig.height },
+      editAs: 'oneCell',
+    });
+  }
+}
+
+function addSheet(
+  wb: ExcelJS.Workbook,
+  sheet: RenderSheet,
+  images: Map<string, LoadedImage>,
+): void {
   // Fit each sheet to one page wide so printing does not slice columns across
   // pages; height is left to spill as needed.
   const ws = wb.addWorksheet(safeSheetName(sheet.name), {
@@ -114,13 +169,19 @@ function addSheet(wb: ExcelJS.Workbook, sheet: RenderSheet): void {
   for (const [rIdx, size] of sheet.rowHeights) {
     ws.getRow(rIdx).height = round2(size * 0.75);
   }
+
+  // Images go on last, so the anchor maths sees the final row and column sizes.
+  addImages(wb, ws, sheet, images);
 }
 
-export async function renderModelToXlsx(model: RenderModel): Promise<Buffer> {
+export async function renderModelToXlsx(
+  model: RenderModel,
+  images: Map<string, LoadedImage> = new Map(),
+): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
 
   for (const sheet of model.sheets) {
-    addSheet(wb, sheet);
+    addSheet(wb, sheet, images);
   }
 
   wb.calcProperties.fullCalcOnLoad = false;

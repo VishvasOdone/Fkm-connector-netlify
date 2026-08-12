@@ -135,6 +135,41 @@ function rangePositions(ranges, keep, into) {
         }
     }
 }
+/**
+ * Image figures of one sheet. Charts and other figure tags are ignored: this
+ * renderer only knows how to place a picture.
+ */
+function readFigures(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const out = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object')
+            continue;
+        const fig = item;
+        if (fig.tag !== 'image')
+            continue;
+        const path = fig.data?.path;
+        if (typeof path !== 'string' || !path)
+            continue;
+        const offset = (fig.offset ?? {});
+        const num = (v, dflt = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : dflt);
+        const width = num(fig.width);
+        const height = num(fig.height);
+        if (width <= 0 || height <= 0)
+            continue;
+        out.push({
+            col: Math.max(0, Math.trunc(num(fig.col))),
+            row: Math.max(0, Math.trunc(num(fig.row))),
+            offsetX: num(offset.x),
+            offsetY: num(offset.y),
+            width,
+            height,
+            path,
+        });
+    }
+    return out;
+}
 /** Strip a leading '=' / '+' the way the original overlay did. */
 function coerceOverlayValue(value) {
     let val = value;
@@ -245,6 +280,7 @@ export function buildRenderModel(baseData, inputValues) {
         const sheet = {
             name,
             cells: new Map(),
+            figures: [],
             merges: [],
             colWidths: new Map(),
             rowHeights: new Map(),
@@ -300,6 +336,7 @@ export function buildRenderModel(baseData, inputValues) {
                 if (c > sheet.maxCol)
                     sheet.maxCol = c;
             }
+            sheet.figures = readFigures(sheetInfo.figures);
             sheet.merges = [...(sheetInfo.merges ?? [])];
             for (const [colIdxStr, colInfo] of Object.entries(sheetInfo.cols ?? {})) {
                 const cIdx = parseInt(colIdxStr, 10) + 1;

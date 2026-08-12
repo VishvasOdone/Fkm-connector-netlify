@@ -18,6 +18,7 @@ import { getLogger, errText } from './logger.js';
 import { SpreadsheetJson } from './spreadsheet/book.js';
 import { colLetter } from './spreadsheet/refs.js';
 import { buildRenderModel, InputValue } from './render/model.js';
+import { loadFigureImages } from './render/images.js';
 import { renderModelToXlsx } from './render/xlsx.js';
 
 const logger = getLogger('calculator');
@@ -66,9 +67,9 @@ export async function getCalculatorState(
       'Overlaying order spreadsheet instance cell updates onto base quotation template structure.',
     );
     const combined = overlaySpreadsheetInstance(tmplData, baseData);
-    xlsxBytes = await buildXlsx(combined, inputValues);
+    xlsxBytes = await buildXlsx(combined, inputValues, odoo);
   } else {
-    xlsxBytes = await buildXlsx(baseData, inputValues);
+    xlsxBytes = await buildXlsx(baseData, inputValues, odoo);
   }
 
   // Step 4: validate the generated print sheets for unexpected formula errors.
@@ -226,6 +227,13 @@ export function overlaySpreadsheetInstance(
       for (const [cellRef, cellVal] of Object.entries(instCells)) {
         if (cellVal !== null && cellVal !== undefined) tmplCells[cellRef] = cellVal;
       }
+
+      // Figures are replaced wholesale, not merged: the order's own instance is
+      // the live set of images, and the user may have moved or deleted the ones
+      // the template started with.
+      if (Array.isArray(instSheet.figures)) {
+        sheetInfo.figures = instSheet.figures as unknown[];
+      }
     }
   }
 
@@ -347,12 +355,19 @@ export function extractInputCellValues(
   return cellValues;
 }
 
-/** Evaluate the spreadsheet into a render model and emit the workbook. */
+/**
+ * Evaluate the spreadsheet into a render model and emit the workbook. The Odoo
+ * client is optional: without it the sheets render without their images, which
+ * is what the offline fixtures do.
+ */
 export async function buildXlsx(
   baseData: SpreadsheetJson,
   inputValues: Map<string, InputValue>,
+  odoo?: OdooClient,
 ): Promise<Buffer> {
-  return renderModelToXlsx(buildRenderModel(baseData, inputValues));
+  const model = buildRenderModel(baseData, inputValues);
+  const images = odoo ? await loadFigureImages(odoo, model) : new Map();
+  return renderModelToXlsx(model, images);
 }
 
 /** Validate that the print sheets do not contain unexpected formula error values. */

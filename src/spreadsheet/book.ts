@@ -17,6 +17,8 @@ export interface SheetJson {
   formats?: Record<string, number>;
   /** Range map ("I4:I6" -> border id) into the workbook's `borders` table. */
   borders?: Record<string, number>;
+  /** Anchored images and charts; only `tag: "image"` entries are rendered. */
+  figures?: unknown[];
   [k: string]: unknown;
 }
 

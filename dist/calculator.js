@@ -16,6 +16,7 @@ import { OdooClient } from './odooRpc.js';
 import { getLogger, errText } from './logger.js';
 import { colLetter } from './spreadsheet/refs.js';
 import { buildRenderModel } from './render/model.js';
+import { loadFigureImages } from './render/images.js';
 import { renderModelToXlsx } from './render/xlsx.js';
 const logger = getLogger('calculator');
 /** Known error values to validate against. */
@@ -46,10 +47,10 @@ export async function getCalculatorState(orderId, spreadsheetId, client) {
     if (tmplData && (tmplData.sheets?.length ?? 0) > 0) {
         logger.info('Overlaying order spreadsheet instance cell updates onto base quotation template structure.');
         const combined = overlaySpreadsheetInstance(tmplData, baseData);
-        xlsxBytes = await buildXlsx(combined, inputValues);
+        xlsxBytes = await buildXlsx(combined, inputValues, odoo);
     }
     else {
-        xlsxBytes = await buildXlsx(baseData, inputValues);
+        xlsxBytes = await buildXlsx(baseData, inputValues, odoo);
     }
     // Step 4: validate the generated print sheets for unexpected formula errors.
     await validateXlsxOutput(xlsxBytes);
@@ -160,6 +161,12 @@ export function overlaySpreadsheetInstance(tmplData, instanceData) {
                 if (cellVal !== null && cellVal !== undefined)
                     tmplCells[cellRef] = cellVal;
             }
+            // Figures are replaced wholesale, not merged: the order's own instance is
+            // the live set of images, and the user may have moved or deleted the ones
+            // the template started with.
+            if (Array.isArray(instSheet.figures)) {
+                sheetInfo.figures = instSheet.figures;
+            }
         }
     }
     return merged;
@@ -266,9 +273,15 @@ export function extractInputCellValues(baseData, revisions) {
     }
     return cellValues;
 }
-/** Evaluate the spreadsheet into a render model and emit the workbook. */
-export async function buildXlsx(baseData, inputValues) {
-    return renderModelToXlsx(buildRenderModel(baseData, inputValues));
+/**
+ * Evaluate the spreadsheet into a render model and emit the workbook. The Odoo
+ * client is optional: without it the sheets render without their images, which
+ * is what the offline fixtures do.
+ */
+export async function buildXlsx(baseData, inputValues, odoo) {
+    const model = buildRenderModel(baseData, inputValues);
+    const images = odoo ? await loadFigureImages(odoo, model) : new Map();
+    return renderModelToXlsx(model, images);
 }
 /** Validate that the print sheets do not contain unexpected formula error values. */
 export async function validateXlsxOutput(xlsxBytes) {
